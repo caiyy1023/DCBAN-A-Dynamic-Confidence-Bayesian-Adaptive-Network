@@ -1,6 +1,3 @@
-"""
-
-"""
 from random import sample
 import numpy as np
 from numpy import interp
@@ -22,17 +19,12 @@ __all__ = ["BAfracridge", "vec_len", "BAFracRidgeRegressor",
            "BAFracRidgeRegressorCV"]
 
 import sys
-sys.path.append('/home/dell222/data/anaconda3/envs/ldm/lib/python3.8/site-packages/fracridge/')
 from methods.nestedlora import NestedLoRA
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.decomposition import PCA
-from models.builder import get_resnet_backbone  # 导入ResNet模型
-from models.siam import SiamNetwork  # 导入Siam网络
-from models.wide_resnet_nef import WideResNet  # 导入WideResNet模型
-from models.mlp import get_mlp_eigfuncs  # 导入MLP模型构建方法
 
 class AttentionLayer(nn.Module):
     def __init__(self, input_dim):
@@ -40,35 +32,20 @@ class AttentionLayer(nn.Module):
         self.attention_weights = nn.Parameter(torch.rand(input_dim))  # 学习到的注意力权重
 
     def forward(self, x):
-        # 计算注意力加权和
         weighted_sum = torch.sum(x * self.attention_weights, dim=-1, keepdim=True)
         return weighted_sum
 
-# 定义一个神经网络 SVD 函数，用于跨域检索任务
 def neural_svd(X, Y, model_type='mlp', backbone_arch='resnet50', epochs=1000, output_dim=688):
-    # 定义输入矩阵 X 和 Y 的维度
-    input_dim = X.shape[1]
-    hidden_dim = 1024  # 可以调整的隐藏层维度
 
-    # 将 NumPy 数组转换为 PyTorch Tensor
-    X = torch.tensor(X, dtype=torch.float32)
-    Y = torch.tensor(Y, dtype=torch.float32)
-
-    # 数据和模型移动到 GPU 上，以加速训练过程
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     X = X.to(device)
     Y = Y.to(device)
-
-    # 使用 PCA 对 Y 进行降维，并作为训练目标
-    pca = PCA(n_components=output_dim)#output_dim是降维后的维度
+    pca = PCA(n_components=output_dim)
     Y_numpy = Y.cpu().numpy()
     target_matrix_pca = pca.fit_transform(Y_numpy)
     target_matrix_pca = torch.tensor(target_matrix_pca, dtype=torch.float32).to(device)
-    #注意力机制
     attention_layer = AttentionLayer(output_dim)
     target_matrix = attention_layer(target_matrix_pca)
 
-    # 根据不同的模型类型选择模型
     if model_type == 'mlp':
         model = get_mlp_eigfuncs(input_dim, output_dim, mlp_hidden_dims='512,512', nonlinearity='relu')
     elif model_type == 'resnet':
@@ -81,55 +58,34 @@ def neural_svd(X, Y, model_type='mlp', backbone_arch='resnet50', epochs=1000, ou
         raise ValueError("Invalid model type. Choose from ['mlp', 'resnet', 'wideresnet'].")
 
     model = model.to(device)
-    # 初始化 SVD 解码器
-    neigs = min(X.shape[0], X.shape[1])  # 保证奇异值的个数不超过矩阵的维度
-    nested_lora = NestedLoRA(model, neigs)  # 替换成合适的低秩近似类
+    neigs = min(X.shape[0], X.shape[1])
+    nested_lora = NestedLoRA(model, neigs)  
 
-    # 定义损失函数和优化器
+
     optimizer = optim.Adam(nested_lora.parameters(), lr=1e-3)
-    loss_fn = nn.MSELoss()  # 使用均方误差损失
+    loss_fn = nn.MSELoss() 
 
-    # 训练循环
+
     for epoch in range(epochs):
         optimizer.zero_grad()
+        output = nested_lora(X)  
 
-        # 前向传播，计算奇异向量
-        output = nested_lora(X)  # 这里的 output 的形状应与 output_dim 匹配
-
-        # 计算损失
         loss = loss_fn(output, target_matrix)
 
-        # 反向传播和优化
         loss.backward()
         optimizer.step()
 
-        # 打印每个 epoch 的损失
         if epoch % 10 == 0:
             print(f'Epoch {epoch}/{epochs}, Loss: {loss.item()}')
 
-    # 训练完成后，估计奇异值和奇异向量
     final_output = nested_lora(X)
-
-    # 估计奇异值，长度为 output_dim
     estimated_singular_values = torch.norm(final_output, dim=0)
-
-    # 估计右奇异向量
     estimated_right_singular_vectors = final_output / estimated_singular_values
-
-    # 估计左奇异向量
     estimated_left_singular_vectors = torch.matmul(X.T, estimated_right_singular_vectors)
-
-    # 归一化左奇异向量
     left_singular_vector_norms = torch.norm(estimated_left_singular_vectors, dim=1)
     estimated_left_singular_vectors = estimated_left_singular_vectors / left_singular_vector_norms.unsqueeze(1)
-
-    # 打印特征值的形状
     print("Estimated Singular Values Shape:", estimated_singular_values.shape)
-
     return estimated_right_singular_vectors, estimated_singular_values, estimated_left_singular_vectors
-
-
-
 
 def _do_svd(X, y):
     """
@@ -418,12 +374,10 @@ class BAFracRidgeRegressorCV(BAFracRidgeRegressor):
         self.alpha_ = estimator.alpha_
         self.is_fitted_ = True
         self.n_features_in_ = X.shape[1]
-
         return self
 
     def _more_tags(self):
         return {'multioutput': True}
-
 
 def vec_len(vec, axis=0):
     return np.sqrt((vec * vec).sum(axis=axis))
