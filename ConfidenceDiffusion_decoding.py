@@ -199,35 +199,64 @@ def main():
     roi_c = 'ventral'
     scores_c = np.load(f'../../decoded73000_zhixing/{subject}/{subject}_{roi_c}_scores_c.npy')
     carr = scores_c[imgidx, :].reshape(77, 768)
-    c = torch.Tensor(carr).unsqueeze(0).to('cuda')
+
+
+ 
+import torch
+import os
+import numpy as np
+from PIL import Image
+from einops import rearrange
+from tqdm import trange
+from contextlib import contextmanager
+
+def dcaf(carr, confidence_net, model, sampler, init_latent, t_enc, scale, sample_path,
+         imgidx=0, n_iter=10, batch_size=1, weight_multiplier=1.0, device='cuda'):
+
+    # 将 carr 转换为张量，并传入 CUDA
+    c = torch.Tensor(carr).unsqueeze(0).to(device)
+
+    # 获取置信度权重
     with torch.no_grad():
-        conf_weight = confidence_net(c)  
-    weight_multiplier = 1  
+        conf_weight = confidence_net(c)  # 输出形状应该为 (1, feature_dim)
     conf_weight = conf_weight * weight_multiplier
 
     base_count = 0
+
     with torch.inference_mode():
-        with precision_scope("cuda"):
+        with precision_scope(device):
             with model.ema_scope():
                 for n in trange(n_iter, desc="Sampling"):
 
-                    time_decay = max(0.0, 1.0 - (n / n_iter))  
+                    time_decay = max(0.0, 1.0 - (n / n_iter))
+                    
+                    # 计算动态条件（Dynamic Conditioning）
                     uc = model.get_learned_conditioning([""])
                     dynamic_c = c * conf_weight * time_decay + uc * (1 - conf_weight * time_decay)
+
                     uc = model.get_learned_conditioning(batch_size * [""])
-                    z_enc = sampler.stochastic_encode(init_latent, torch.tensor([t_enc] * batch_size).to(device))
-                    samples = sampler.decode(z_enc, dynamic_c, t_enc, unconditional_guidance_scale=scale,
-                                             unconditional_conditioning=uc)
+                    z_enc = sampler.stochastic_encode(
+                        init_latent,
+                        torch.tensor([t_enc] * batch_size).to(device)
+                    )
+                    samples = sampler.decode(
+                        z_enc, dynamic_c, t_enc,
+                        unconditional_guidance_scale=scale,
+                        unconditional_conditioning=uc
+                    )
                     x_samples = model.decode_first_stage(samples)
                     x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
-                                      
+
                     for x_sample in x_samples:
                         print(f"x_samples类型: {type(x_samples)}, 形状: {x_samples.shape}")
-                        x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                        Image.fromarray(x_sample.astype(np.uint8)).save(
-                            os.path.join(sample_path, f"{imgidx:05}_{base_count:03}.png"))
+                        x_sample_np = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                        img = Image.fromarray(x_sample_np.astype(np.uint8))
+                        img.save(os.path.join(sample_path, f"{imgidx:05}_{base_count:03}.png"))
                         base_count += 1
 
+@contextmanager
+def precision_scope(device):
+    yield
 
 if __name__ == "__main__":
-    main()
+    dcaf()
