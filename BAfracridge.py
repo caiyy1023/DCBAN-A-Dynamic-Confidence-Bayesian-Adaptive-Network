@@ -87,12 +87,7 @@ def neural_svd(X, Y, model_type='mlp', backbone_arch='resnet50', epochs=1000, ou
     print("Estimated Singular Values Shape:", estimated_singular_values.shape)
     return estimated_right_singular_vectors, estimated_singular_values, estimated_left_singular_vectors
 
-def _do_svd(X, y):
-    """
-    Helper function to produce SVD outputs
-    """
-
-
+def deepsvd(X, y):
     if len(y.shape) == 1:
         y = y[:, np.newaxis]
 
@@ -121,19 +116,104 @@ def _do_svd(X, y):
         v_t_detached = v_t.detach()
         v_t_cpu = v_t_detached.cpu()
         v_t = v_t_cpu.numpy()
-
-
         ynew = uu.T @ y
-
-
     ols_coef = (ynew.T / selt).T
-
     return selt, v_t, ols_coef
+
+import numpy as np
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
+from scipy.stats import norm
+
+# Expected Improvement (EI) acquisition function
+def expected_improvement(X, X_sample, Y_sample, gpr, xi=0.01):
+    mu, sigma = gpr.predict(X, return_std=True)
+    mu_sample_opt = np.min(Y_sample)
+
+    with np.errstate(divide='warn'):
+        imp = mu_sample_opt - mu - xi
+        Z = imp / sigma
+        ei = imp * norm.cdf(Z) + sigma * norm.pdf(Z)
+        ei[sigma == 0.0] = 0.0
+    return ei
+
+# Bayesian Optimization for Ridge Regression
+# Modify function to return optimized alpha grid from Bayesian Optimization
+
+import numpy as np
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
+from sklearn.linear_model import Ridge
+from scipy.stats import norm
+
+
+def log_space_grid(s_min, s_max, SMALLBIAS, BIGBIAS, N):
+    D = (np.log10(BIGBIAS * s_max) - np.log10(SMALLBIAS * s_min)) / (N - 1)
+    log_a = np.array([np.log10(SMALLBIAS * s_min) + i * D for i in range(N)])
+    return np.power(10, log_a)
+
+
+def compute_mse(y_true, y_pred):
+    return np.mean((y_true - y_pred) ** 2)
+
+
+def expected_improvement(X, model, y_best, xi=0.01):
+    mu, sigma = model.predict(X.reshape(-1, 1), return_std=True)
+    sigma = sigma.reshape(-1, 1)
+    mu = mu.reshape(-1, 1)
+    with np.errstate(divide='warn'):
+        imp = y_best - mu - xi
+        Z = imp / sigma
+        ei = imp * norm.cdf(Z) + sigma * norm.pdf(Z)
+        ei[sigma == 0.0] = 0.0
+    return ei.flatten()
+
+
+def update_grid(best_alpha, s, d, N):
+    ks = np.arange(-N//2, N//2)
+    tanh_values = np.tanh(ks)
+    new_grid = best_alpha + s * d * tanh_values
+    new_grid = np.clip(new_grid, 1e-8, None)  # avoid negative or zero
+    return np.unique(new_grid)
+
+
+def bago(X_train, y_train, X_val, y_val, s_min, s_max, SMALLBIAS, BIGBIAS, N=20, L=20, d=1.0, s=0.1):
+    A = log_space_grid(s_min, s_max, SMALLBIAS, BIGBIAS, N)
+    observed_alphas = []
+    observed_mse = []
+
+    for i in range(L):
+        # Evaluate all alpha in grid
+        for alpha in A:
+            if alpha not in observed_alphas:
+                model = Ridge(alpha=alpha)
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_val)
+                mse = compute_mse(y_val, y_pred)
+                observed_alphas.append(alpha)
+                observed_mse.append(mse)
+
+        X_obs = np.array(observed_alphas).reshape(-1, 1)
+        y_obs = np.array(observed_mse)
+
+        # Build GP model
+        kernel = C(1.0) * RBF(length_scale=1.0)
+        gp = GaussianProcessRegressor(kernel=kernel, alpha=1e-6, normalize_y=True)
+        gp.fit(X_obs, y_obs)
+
+        # Compute EI
+        ei = expected_improvement(A, gp, y_best=np.min(y_obs))
+        best_idx = np.argmax(ei)
+        best_alpha = A[best_idx]
+
+        # Update grid around best_alpha
+        A = update_grid(best_alpha, s, d, N)
+
+    return min(zip(observed_alphas, observed_mse), key=lambda x: x[1])
+
 
 
 def BAfracridge(X, y, fracs=None, tol=1e-10, jit=True):
-
-
     if fracs is None:
         fracs = np.arange(.1, 1.1, .1)
 
@@ -155,7 +235,7 @@ def BAfracridge(X, y, fracs=None, tol=1e-10, jit=True):
     ff = fracs.shape[0]
 
     # Calculate the rotation of the data
-    selt, v_t, ols_coef = _do_svd(X, y)
+    selt, v_t, ols_coef = deepsvd(X, y)
     # print('selt', selt.shape)
 
     X_cpu = X.cpu()
@@ -171,14 +251,9 @@ def BAfracridge(X, y, fracs=None, tol=1e-10, jit=True):
     ols_coef[isbad, ...] = 0
 
     # Limits on the grid of candidate alphas used for interpolation:
-    val1 = BIG_BIAS * selt[0] ** 2
-    val2 = SMALL_BIAS * selt[-1] ** 2
 
     # Generates the grid of candidate alphas used in interpolation:
-    alphagrid = np.concatenate(
-        [np.array([0]),
-         10 ** np.arange(np.floor(np.log10(val2)),
-                         np.ceil(np.log10(val1)), BIAS_STEP)])
+    alphagrid = bago(X,y)
 
     # The scaling factor applied to coefficients in the rotated space is
     # lambda**2 / (lambda**2 + alpha), where lambda are the singular values
