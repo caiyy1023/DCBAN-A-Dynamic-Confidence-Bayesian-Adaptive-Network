@@ -1,122 +1,48 @@
-import argparse, os
+import argparse
+import os
 import numpy as np
-import torch.cuda
-from himalaya.backend import set_backend
-from himalaya.ridge import RidgeCV
-from himalaya.scoring import correlation_score
+import torch
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-import numpy as np
 from BAfracridge import BAFracRidgeRegressor
-import torch
-
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Train BAFracRidge model on fMRI and image features.")
+    parser.add_argument('--fmri_train', type=str, required=True, help='Path to training fMRI features (npy file)')
+    parser.add_argument('--fmri_test', type=str, required=True, help='Path to test fMRI features (npy file)')
+    parser.add_argument('--image_train', type=str, required=True, help='Path to training image features (npy file)')
+    parser.add_argument('--image_test', type=str, required=True, help='Path to test image features (npy file)')
+    parser.add_argument('--output', type=str, default='fmri_pred.npy', help='Path to save predicted fMRI features')
+    args = parser.parse_args()
 
-    parser.add_argument(
-        "--target",
-        type=str,
-        default='',
-        help="Target variable",
-    )
-    parser.add_argument(
-        "--roi",
-        required=True,
-        type=str,
-        nargs="*",
-        help="use roi name",
-    )
-    parser.add_argument(
-        "--subject",
-        type=str,
-        default=None,
-        help="subject name: subj01 or subj02  or subj05  or subj07 for full-data subjects ",
-    )
+    # 加载数据
+    X_train = np.load(args.image_train)  # 图像特征
+    X_test = np.load(args.image_test)
+    Y_train = np.load(args.fmri_train)   # fMRI特征
+    Y_test = np.load(args.fmri_test)
 
-    opt = parser.parse_args()
-    target = opt.target
-    roi = opt.roi
+    # 定义 gamma 值范围
+    gamma_values = np.linspace(0, 1, 21)
 
-    # target = "c"
-    # roi = ["ventral"]
-
-
-    backend = set_backend("numpy", on_error="warn")
-    subject = opt.subject
-    # subject = "subj01"
-
-    # 定义γ值范围
-    gamma_values = np.linspace(0, 1, 21)  # 从0到1，间隔为0.05
-
-
+    # 构建 BAFracRidge 模型
     ridge = BAFracRidgeRegressor(fracs=gamma_values)
 
-
-    preprocess_pipeline = make_pipeline(
-
-        StandardScaler(with_mean=True, with_std=True),
-    )
+    # 构建预处理 + 模型的 pipeline
+    preprocess_pipeline = make_pipeline(StandardScaler(with_mean=True, with_std=True))
     pipeline = make_pipeline(
         preprocess_pipeline,
         ridge,
     )
 
-    import cupy as cp
+    # 训练模型
+    pipeline.fit(X_train, Y_train)
 
-    # 查看当前正在使用的设备
-    device = cp.cuda.Device()
-    print("Current device:", device)
+    # 预测
+    Y_pred = pipeline.predict(X_test)
 
-    mridir = f'../../mrifeatsession1/{subject}/'
-    featdir = '../../nsdfeatsession1/subjfeat/'
-    savedir = f'../..//decodedFRR_neuralsvd/{subject}/'
-    os.makedirs(savedir, exist_ok=True)
+    # 保存预测结果
+    np.save(args.output, Y_pred)
+    print(f"预测的 fMRI 特征已保存到: {args.output}")
 
-    X = []
-    X_te = []
-    for croi in roi:
-        if 'conv' in target:  # We use averaged features for GAN due to large number of dimension of features
-            cX = np.load(f'{mridir}/{subject}_{croi}_betas_ave_tr.npy').astype("float32")
-        else:
-            cX = np.load(f'{mridir}/{subject}_{croi}_betas_tr.npy').astype("float32")
-        cX_te = np.load(f'{mridir}/{subject}_{croi}_betas_ave_te.npy').astype("float32")
-        X.append(cX)
-        X_te.append(cX_te)
-    X = np.hstack(X)
-    X_te = np.hstack(X_te)
-
-    Y = np.load(f'{featdir}/{subject}_each_{target}_tr.npy').astype("float32")
-
-    Y = Y.reshape([X.shape[0], -1])
-    Y_te = np.load(f'{featdir}/{subject}_ave_{target}_te.npy').astype("float32").reshape([X_te.shape[0], -1])
-
-    print(f'Now making decoding model for... {subject}:  {roi}, {target}')
-    print(f'X {X.shape}, Y {Y.shape}, X_te {X_te.shape}, Y_te {Y_te.shape}')
-
-    def fit_in_batches(model, X, y, batch_size=1):
-
-        n_samples = X.shape[0]
-
-        for start in range(0, n_samples, batch_size):
-            end = min(start + batch_size, n_samples)
-            print(f"Fitting batch from {start} to {end}")
-            model.fit(X[start:end], y[start:end])
-
-    # print("X:",X)
-    # print("Y:",Y)
-
-    # 调用分批处理的拟合函数
-    # fit_in_batches(pipeline, X, Y)
-
-    pipeline.fit(X, Y)
-    scores = pipeline.predict(X_te)
-
-    rs = correlation_score(Y_te.T, scores.T[:,0,:])
-    print(f'Prediction accuracy is: {np.mean(rs):3.3}')
-
-    np.save(f'{savedir}/{subject}_{"_".join(roi)}_scores_{target}.npy', scores)
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
